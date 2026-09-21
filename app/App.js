@@ -75,7 +75,7 @@ export default function App() {
             onAddVehicle={() => setAddingVehicle(true)}
           />
         ) : (
-          <GovernmentScreen vehicles={vehicles} onChanged={refresh} />
+          <GovernmentScreen />
         )}
       </View>
 

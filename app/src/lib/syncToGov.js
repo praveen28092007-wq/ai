@@ -39,3 +39,47 @@ export async function syncTripToGovDashboard(ownerName, regNo, fuelType, trip) {
     return { synced: false, reason: e.message };
   }
 }
+
+// Fetches this person's fines + permit request status from the shared backend.
+// Returns null on any failure so callers can fall back to "no notifications" quietly.
+export async function fetchPersonState(ownerName) {
+  if (!GOV_DASHBOARD_URL) return null;
+  try {
+    const res = await fetch(`${GOV_DASHBOARD_URL}/api/people/${encodeURIComponent(ownerName)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.person || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function markNotificationsRead(ownerName) {
+  if (!GOV_DASHBOARD_URL) return;
+  try {
+    await fetch(`${GOV_DASHBOARD_URL}/api/people/${encodeURIComponent(ownerName)}`, {
+      method: 'POST',
+    });
+  } catch (e) {
+    // best-effort — badge will just show again next refresh if this fails
+  }
+}
+
+export async function requestMoreKm(ownerName, extraKgRequested, reason) {
+  if (!GOV_DASHBOARD_URL) return { sent: false, reason: 'no dashboard URL configured' };
+  try {
+    const res = await fetch(
+      `${GOV_DASHBOARD_URL}/api/people/${encodeURIComponent(ownerName)}/permit-request`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ extraKgRequested, reason }),
+      }
+    );
+    const data = await res.json();
+    if (!res.ok) return { sent: false, reason: data.error || `HTTP ${res.status}` };
+    return { sent: true, request: data.request };
+  } catch (e) {
+    return { sent: false, reason: e.message };
+  }
+}

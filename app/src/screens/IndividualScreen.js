@@ -1,11 +1,31 @@
-import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  Alert,
+  Modal,
+  TextInput,
+} from 'react-native';
 import { colors } from '../theme';
-import { pulsesToVolumeMl, volumeMlToCo2Kg, YEARLY_CO2_BUDGET_KG, isOverThreshold } from '../lib/emissions';
+import {
+  pulsesToVolumeMl,
+  volumeMlToCo2Kg,
+  YEARLY_CO2_BUDGET_KG,
+  effectiveBudgetKg,
+  isOverThreshold,
+} from '../lib/emissions';
 import { useDistanceTracker } from '../lib/useDistanceTracker';
 import { SimulatedSensorSource, generateDummyTrip } from '../lib/sensorSource';
 import { upsertTrip, vehiclesOwnedBy } from '../lib/storage';
-import { syncTripToGovDashboard } from '../lib/syncToGov';
+import {
+  syncTripToGovDashboard,
+  fetchPersonState,
+  markNotificationsRead,
+  requestMoreKm,
+} from '../lib/syncToGov';
 
 export default function IndividualScreen({
   profile,
@@ -16,8 +36,22 @@ export default function IndividualScreen({
 }) {
   const [running, setRunning] = useState(false);
   const [pulseCount, setPulseCount] = useState(0);
+  const [person, setPerson] = useState(null);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [showRequestForm, setShowRequestForm] = useState(false);
   const sensorRef = useRef(null);
   const distanceTracker = useDistanceTracker();
+
+  const refreshPerson = useCallback(async () => {
+    const p = await fetchPersonState(profile.name);
+    setPerson(p);
+  }, [profile.name]);
+
+  useEffect(() => {
+    refreshPerson();
+    const id = setInterval(refreshPerson, 8000);
+    return () => clearInterval(id);
+  }, [refreshPerson]);
 
   useEffect(() => {
     return () => sensorRef.current?.stop?.();
@@ -29,9 +63,11 @@ export default function IndividualScreen({
   const volumeMl = pulsesToVolumeMl(pulseCount);
   const tripCo2Kg = vehicle ? volumeMlToCo2Kg(volumeMl, vehicle.fuelType) : 0;
 
-  const cumulativeCo2Kg = (vehicle?.cumulativeCo2Kg || 0) + tripCo2Kg;
-  const overThreshold = isOverThreshold(cumulativeCo2Kg);
-  const percentOfBudget = Math.min(150, Math.round((cumulativeCo2Kg / YEARLY_CO2_BUDGET_KG) * 100));
+  const totalCo2Kg = myVehicles.reduce((sum, v) => sum + (v.cumulativeCo2Kg || 0), 0) + tripCo2Kg;
+  const budget = effectiveBudgetKg(person);
+  const overThreshold = isOverThreshold(totalCo2Kg, budget);
+  const percentOfBudget = Math.min(150, Math.round((totalCo2Kg / budget) * 100));
+  const unreadCount = person?.unreadCount || 0;
 
   async function startTrip() {
     setPulseCount(0);
@@ -78,6 +114,14 @@ export default function IndividualScreen({
     );
   }
 
+  async function openNotifications() {
+    setShowNotifications(true);
+    if (unreadCount > 0) {
+      await markNotificationsRead(profile.name);
+      refreshPerson();
+    }
+  }
+
   if (!vehicle) {
     return (
       <View style={styles.emptyScreen}>
@@ -91,7 +135,17 @@ export default function IndividualScreen({
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <Text style={styles.hello}>Hi {profile.name} 👋</Text>
+      <View style={styles.headerRow}>
+        <Text style={styles.hello}>Hi {profile.name} 👋</Text>
+        <TouchableOpacity onPress={openNotifications} style={styles.bellBtn}>
+          <Text style={styles.bellIcon}>🔔</Text>
+          {unreadCount > 0 && (
+            <View style={styles.bellBadge}>
+              <Text style={styles.bellBadgeText}>{unreadCount}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      </View>
 
       <View style={styles.vehicleSwitcherRow}>
         {myVehicles.map((v) => (
@@ -140,9 +194,9 @@ export default function IndividualScreen({
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.cardLabel}>Your total this year</Text>
+        <Text style={styles.cardLabel}>Your total this year (all vehicles)</Text>
         <Text style={[styles.bigNumber, overThreshold && { color: colors.danger }]}>
-          {cumulativeCo2Kg.toFixed(1)} kg CO2
+          {totalCo2Kg.toFixed(1)} kg CO2
         </Text>
 
         <View style={styles.progressTrack}>
@@ -157,7 +211,8 @@ export default function IndividualScreen({
           />
         </View>
         <Text style={styles.subtext}>
-          {percentOfBudget}% of your {YEARLY_CO2_BUDGET_KG} kg yearly limit
+          {percentOfBudget}% of your {budget} kg yearly limit
+          {person?.budgetBonusKg > 0 ? ` (${YEARLY_CO2_BUDGET_KG} base + ${person.budgetBonusKg} approved)` : ''}
         </Text>
 
         {overThreshold && (
@@ -165,6 +220,10 @@ export default function IndividualScreen({
             ⚠ You've gone over the limit. This shows up as flagged on the government dashboard.
           </Text>
         )}
+
+        <TouchableOpacity style={styles.requestBtn} onPress={() => setShowRequestForm(true)}>
+          <Text style={styles.requestBtnText}>🚧  Request More KM</Text>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.card}>
@@ -180,7 +239,129 @@ export default function IndividualScreen({
           </View>
         ))}
       </View>
+
+      <NotificationsModal
+        visible={showNotifications}
+        person={person}
+        onClose={() => setShowNotifications(false)}
+      />
+      <RequestKmModal
+        visible={showRequestForm}
+        ownerName={profile.name}
+        onClose={() => setShowRequestForm(false)}
+        onSent={() => {
+          setShowRequestForm(false);
+          refreshPerson();
+        }}
+      />
     </ScrollView>
+  );
+}
+
+function NotificationsModal({ visible, person, onClose }) {
+  const fines = person?.fines || [];
+  const decidedRequests = (person?.permitRequests || []).filter((r) => r.status !== 'pending');
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeaderRow}>
+            <Text style={styles.modalTitle}>Notifications</Text>
+            <TouchableOpacity onPress={onClose}>
+              <Text style={styles.modalClose}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ maxHeight: 380 }}>
+            {fines.length === 0 && decidedRequests.length === 0 && (
+              <Text style={styles.subtext}>Nothing here yet.</Text>
+            )}
+            {fines.map((f) => (
+              <View key={f.id} style={styles.notifCardDanger}>
+                <Text style={styles.notifTitleDanger}>Fine issued: ₹{f.amountInr}</Text>
+                {!!f.reason && <Text style={styles.notifBody}>{f.reason}</Text>}
+                <Text style={styles.notifTime}>{new Date(f.issuedAt).toLocaleString()}</Text>
+              </View>
+            ))}
+            {decidedRequests.map((r) => (
+              <View
+                key={r.id}
+                style={r.status === 'approved' ? styles.notifCardSuccess : styles.notifCardNeutral}
+              >
+                <Text style={r.status === 'approved' ? styles.notifTitleSuccess : styles.notifTitleNeutral}>
+                  KM request {r.status === 'approved' ? 'approved' : 'denied'}: +{r.extraKgRequested} kg
+                </Text>
+                <Text style={styles.notifTime}>{new Date(r.decidedAt).toLocaleString()}</Text>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function RequestKmModal({ visible, ownerName, onClose, onSent }) {
+  const [extraKg, setExtraKg] = useState('200');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit() {
+    const amount = Number(extraKg);
+    if (!amount || amount <= 0) {
+      Alert.alert('Enter a valid amount');
+      return;
+    }
+    setSaving(true);
+    const result = await requestMoreKm(ownerName, amount, reason);
+    setSaving(false);
+    if (result.sent) {
+      onSent();
+    } else {
+      Alert.alert('Could not send request', result.reason);
+    }
+  }
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>Request More KM</Text>
+          <Text style={styles.subtext}>
+            Like a toll gate — ask for extra yearly CO2 budget. Government reviews and can
+            approve or deny.
+          </Text>
+
+          <Text style={styles.inputLabel}>Extra CO2 budget (kg)</Text>
+          <TextInput
+            style={styles.input}
+            keyboardType="numeric"
+            value={extraKg}
+            onChangeText={setExtraKg}
+          />
+
+          <Text style={styles.inputLabel}>Reason</Text>
+          <TextInput
+            style={[styles.input, { height: 80, textAlignVertical: 'top' }]}
+            multiline
+            placeholder="e.g. Long trip planned next month"
+            placeholderTextColor={colors.subtext}
+            value={reason}
+            onChangeText={setReason}
+          />
+
+          <View style={styles.modalBtnRow}>
+            <TouchableOpacity style={styles.modalCancelBtn} onPress={onClose}>
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleSubmit} disabled={saving}>
+              <Text style={styles.btnText}>{saving ? 'Sending…' : 'Send Request'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -189,7 +370,23 @@ const styles = StyleSheet.create({
   content: { padding: 20, paddingTop: 60, paddingBottom: 40 },
   emptyScreen: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', padding: 24 },
   emptyText: { color: colors.subtext, fontSize: 15, marginBottom: 16 },
-  hello: { color: colors.subtext, fontSize: 15, fontWeight: '600', marginBottom: 14 },
+  headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
+  hello: { color: colors.subtext, fontSize: 15, fontWeight: '600' },
+  bellBtn: { padding: 4 },
+  bellIcon: { fontSize: 20 },
+  bellBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    backgroundColor: colors.danger,
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  bellBadgeText: { color: '#fff', fontSize: 9, fontWeight: '800' },
   vehicleSwitcherRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 20 },
   vehicleChip: {
     borderColor: colors.cardBorder,
@@ -253,8 +450,85 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 10,
   },
+  requestBtn: {
+    borderColor: colors.accent,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingVertical: 13,
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  requestBtnText: { color: colors.accent, fontWeight: '700', fontSize: 14 },
   btnText: { color: '#fff', fontWeight: '800', fontSize: 16 },
   dummyBtnText: { color: colors.subtext, fontWeight: '700', fontSize: 14 },
   tripRow: { paddingVertical: 8, borderTopColor: colors.cardBorder, borderTopWidth: 1 },
   tripText: { color: colors.text, fontSize: 13 },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 24 },
+  modalCard: {
+    backgroundColor: colors.bg,
+    borderColor: colors.cardBorder,
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 20,
+  },
+  modalHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  modalTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  modalClose: { color: colors.subtext, fontSize: 16 },
+  notifCardDanger: {
+    borderColor: 'rgba(224,80,63,0.4)',
+    borderWidth: 1,
+    backgroundColor: 'rgba(224,80,63,0.1)',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+  },
+  notifTitleDanger: { color: colors.danger, fontWeight: '800', fontSize: 14 },
+  notifCardSuccess: {
+    borderColor: 'rgba(51,193,122,0.4)',
+    borderWidth: 1,
+    backgroundColor: 'rgba(51,193,122,0.1)',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+  },
+  notifTitleSuccess: { color: colors.accent, fontWeight: '800', fontSize: 14 },
+  notifCardNeutral: {
+    borderColor: colors.cardBorder,
+    borderWidth: 1,
+    backgroundColor: colors.card,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+  },
+  notifTitleNeutral: { color: colors.text, fontWeight: '700', fontSize: 14 },
+  notifBody: { color: colors.text, fontSize: 12, marginTop: 4 },
+  notifTime: { color: colors.subtext, fontSize: 11, marginTop: 4 },
+  inputLabel: { color: colors.subtext, fontSize: 12, fontWeight: '600', marginTop: 14, marginBottom: 6 },
+  input: {
+    backgroundColor: colors.inputBg,
+    borderColor: colors.cardBorder,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: colors.text,
+    fontSize: 15,
+  },
+  modalBtnRow: { flexDirection: 'row', gap: 10, marginTop: 20 },
+  modalCancelBtn: {
+    flex: 1,
+    borderColor: colors.cardBorder,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
+  modalCancelText: { color: colors.subtext, fontWeight: '700' },
+  modalSubmitBtn: {
+    flex: 1,
+    backgroundColor: colors.accent,
+    borderRadius: 12,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
 });
