@@ -28,6 +28,27 @@ otherwise.
   re-propose a browser-based live sensor connection without a firmware rewrite to BLE, which
   was considered and rejected. Simulated sensor source + one-tap dummy reading for demo.
   Supports multiple vehicles per person (`src/lib/storage.js`, `src/lib/profile.js`).
+
+  **Real ESP32 Bluetooth connection — implemented, see `src/lib/sensorSource.js`
+  `BluetoothSensorSource`.** The friend-provided firmware is `code.txt` at repo root (do not
+  delete — it's the source of truth for the wire format). Key facts, settled from reading the
+  actual firmware (don't re-derive/re-guess):
+  - Device Bluetooth name: **`WaterFlow_ESP32`** (`ESP32_DEVICE_NAME` in sensorSource.js)
+  - Protocol: classic Bluetooth Serial (SPP), NOT BLE — uses `react-native-bluetooth-classic`
+  - Wire format is human-readable text once/sec, e.g. `Total: 0.567 L` — NOT a `PULSE:n`
+    line (that was an earlier, wrong assumption before the real firmware was seen — don't
+    revert to expecting `PULSE:n`)
+  - The ESP32 sends an **absolute cumulative litre total** (resets only on ESP32 reboot),
+    not a per-tick delta — the app diffs consecutive `Total:` readings itself to get deltas
+  - Firmware's pulses-per-litre constant is 450 (`pulses/450.0`), i.e. ≈2.22 mL/pulse — close
+    to but not identical to the datasheet's 2.25 mL/pulse (`ML_PER_PULSE`) used elsewhere;
+    irrelevant now since the app consumes litres directly from the firmware, not raw pulses
+  - Requires an **Expo dev-client build** (EAS Build, Android APK) — `react-native-bluetooth-classic`
+    is a native module and does NOT work in Expo Go. EAS project is linked
+    (`@kamalesh_expo/app`, see `app.json` extra.eas.projectId and `eas.json`).
+  - User must pair with `WaterFlow_ESP32` in Android Bluetooth settings once, OS-level,
+    before the app's device picker (in IndividualScreen.js, "Connect ESP32" button) will
+    list it.
 - **`web/` (`/` route)** — Next.js government/enforcement dashboard, live at
   **https://ai-co2-dashboard.vercel.app**.
 - **`web/` (`/rider` route)** — Next.js rider portal, live at

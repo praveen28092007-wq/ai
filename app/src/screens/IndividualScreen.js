@@ -11,14 +11,19 @@ import {
 } from 'react-native';
 import { colors } from '../theme';
 import {
-  pulsesToVolumeMl,
   volumeMlToCo2Kg,
   YEARLY_CO2_BUDGET_KG,
   effectiveBudgetKg,
   isOverThreshold,
 } from '../lib/emissions';
 import { useDistanceTracker } from '../lib/useDistanceTracker';
-import { SimulatedSensorSource, generateDummyTrip } from '../lib/sensorSource';
+import {
+  SimulatedSensorSource,
+  BluetoothSensorSource,
+  listPairedDevices,
+  ESP32_DEVICE_NAME,
+  generateDummyTrip,
+} from '../lib/sensorSource';
 import { upsertTrip, vehiclesOwnedBy } from '../lib/storage';
 import {
   syncTripToGovDashboard,
@@ -35,10 +40,12 @@ export default function IndividualScreen({
   onAddVehicle,
 }) {
   const [running, setRunning] = useState(false);
-  const [pulseCount, setPulseCount] = useState(0);
+  const [volumeMl, setVolumeMl] = useState(0);
   const [person, setPerson] = useState(null);
   const [showNotifications, setShowNotifications] = useState(false);
   const [showRequestForm, setShowRequestForm] = useState(false);
+  const [showDevicePicker, setShowDevicePicker] = useState(false);
+  const [connectedDeviceName, setConnectedDeviceName] = useState(null);
   const sensorRef = useRef(null);
   const distanceTracker = useDistanceTracker();
 
@@ -60,7 +67,6 @@ export default function IndividualScreen({
   const myVehicles = vehiclesOwnedBy(vehicles, profile.name);
   const vehicle = myVehicles.find((v) => v.regNo === profile.activeRegNo) || myVehicles[0];
 
-  const volumeMl = pulsesToVolumeMl(pulseCount);
   const tripCo2Kg = vehicle ? volumeMlToCo2Kg(volumeMl, vehicle.fuelType) : 0;
 
   const totalCo2Kg = myVehicles.reduce((sum, v) => sum + (v.cumulativeCo2Kg || 0), 0) + tripCo2Kg;
@@ -70,19 +76,34 @@ export default function IndividualScreen({
   const unreadCount = person?.unreadCount || 0;
 
   async function startTrip() {
-    setPulseCount(0);
+    setVolumeMl(0);
     setRunning(true);
     await distanceTracker.start();
     sensorRef.current = new SimulatedSensorSource();
-    sensorRef.current.start((delta) => setPulseCount((p) => p + delta));
+    sensorRef.current.start((deltaMl) => setVolumeMl((v) => v + deltaMl));
+  }
+
+  async function startTripWithDevice(device) {
+    setVolumeMl(0);
+    setRunning(true);
+    setConnectedDeviceName(device.name);
+    await distanceTracker.start();
+    sensorRef.current = new BluetoothSensorSource(device);
+    try {
+      await sensorRef.current.start((deltaMl) => setVolumeMl((v) => v + deltaMl));
+    } catch (e) {
+      setRunning(false);
+      setConnectedDeviceName(null);
+      Alert.alert('Could not connect', e.message || 'Check the ESP32 is powered on and paired.');
+    }
   }
 
   async function stopTrip() {
     sensorRef.current?.stop?.();
     distanceTracker.stop();
     setRunning(false);
+    setConnectedDeviceName(null);
     await saveTrip({
-      pulseCount,
       volumeMl,
       co2Kg: Number(tripCo2Kg.toFixed(3)),
       distanceKm: Number(distanceTracker.distanceKm.toFixed(3)),
@@ -93,7 +114,6 @@ export default function IndividualScreen({
     const dummy = generateDummyTrip();
     const dummyCo2Kg = volumeMlToCo2Kg(dummy.volumeMl, vehicle.fuelType);
     await saveTrip({
-      pulseCount: dummy.pulseCount,
       volumeMl: dummy.volumeMl,
       co2Kg: Number(dummyCo2Kg.toFixed(3)),
       distanceKm: dummy.distanceKm,
@@ -176,11 +196,17 @@ export default function IndividualScreen({
           {distanceTracker.distanceKm.toFixed(2)} km so far
           {distanceTracker.error ? ' (location not available)' : ''}
         </Text>
+        {running && connectedDeviceName && (
+          <Text style={styles.connectedText}>🔵 Connected to {connectedDeviceName}</Text>
+        )}
 
         {!running ? (
           <>
-            <TouchableOpacity style={styles.startBtn} onPress={startTrip}>
-              <Text style={styles.btnText}>▶  Start Ride</Text>
+            <TouchableOpacity style={styles.startBtn} onPress={() => setShowDevicePicker(true)}>
+              <Text style={styles.btnText}>🔵  Connect ESP32</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.dummyBtn} onPress={startTrip}>
+              <Text style={styles.dummyBtnText}>▶  Start Ride (Simulated)</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.dummyBtn} onPress={useDummyReading}>
               <Text style={styles.dummyBtnText}>⚡  Use a Dummy Reading Instead</Text>
@@ -192,6 +218,15 @@ export default function IndividualScreen({
           </TouchableOpacity>
         )}
       </View>
+
+      <DevicePickerModal
+        visible={showDevicePicker}
+        onClose={() => setShowDevicePicker(false)}
+        onSelect={(device) => {
+          setShowDevicePicker(false);
+          startTripWithDevice(device);
+        }}
+      />
 
       <View style={styles.card}>
         <Text style={styles.cardLabel}>Your total this year (all vehicles)</Text>
@@ -255,6 +290,74 @@ export default function IndividualScreen({
         }}
       />
     </ScrollView>
+  );
+}
+
+function DevicePickerModal({ visible, onClose, onSelect }) {
+  const [devices, setDevices] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const paired = await listPairedDevices();
+        setDevices(paired);
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [visible]);
+
+  const esp32Devices = devices.filter((d) => d.name === ESP32_DEVICE_NAME);
+  const otherDevices = devices.filter((d) => d.name !== ESP32_DEVICE_NAME);
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeaderRow}>
+            <Text style={styles.modalTitle}>Connect ESP32</Text>
+            <TouchableOpacity onPress={onClose}>
+              <Text style={styles.modalClose}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.subtext}>
+            Pair with &ldquo;{ESP32_DEVICE_NAME}&rdquo; in your phone&rsquo;s Bluetooth settings
+            first if it&rsquo;s not listed below.
+          </Text>
+
+          {loading && <Text style={[styles.subtext, { marginTop: 16 }]}>Scanning paired devices…</Text>}
+          {error && <Text style={[styles.warningText, { marginTop: 16 }]}>{error}</Text>}
+
+          <ScrollView style={{ maxHeight: 300, marginTop: 12 }}>
+            {esp32Devices.map((d) => (
+              <TouchableOpacity key={d.address} style={styles.deviceRowHighlight} onPress={() => onSelect(d)}>
+                <Text style={styles.deviceNameHighlight}>🔵 {d.name}</Text>
+                <Text style={styles.deviceAddress}>{d.address}</Text>
+              </TouchableOpacity>
+            ))}
+            {otherDevices.map((d) => (
+              <TouchableOpacity key={d.address} style={styles.deviceRow} onPress={() => onSelect(d)}>
+                <Text style={styles.deviceName}>{d.name || 'Unnamed device'}</Text>
+                <Text style={styles.deviceAddress}>{d.address}</Text>
+              </TouchableOpacity>
+            ))}
+            {!loading && !error && devices.length === 0 && (
+              <Text style={styles.subtext}>
+                No paired devices found. Pair with the ESP32 in Android Bluetooth settings first.
+              </Text>
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -420,6 +523,26 @@ const styles = StyleSheet.create({
   bigNumber: { color: colors.text, fontSize: 30, fontWeight: '800' },
   subtext: { color: colors.subtext, fontSize: 13, marginTop: 4 },
   warningText: { color: colors.danger, marginTop: 12, fontWeight: '600', lineHeight: 18 },
+  connectedText: { color: colors.accent, fontSize: 12, fontWeight: '700', marginTop: 8 },
+  deviceRowHighlight: {
+    borderColor: colors.accent,
+    borderWidth: 1,
+    backgroundColor: colors.accentDim,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+  },
+  deviceNameHighlight: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  deviceRow: {
+    borderColor: colors.cardBorder,
+    borderWidth: 1,
+    backgroundColor: colors.card,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+  },
+  deviceName: { color: colors.text, fontWeight: '600', fontSize: 14 },
+  deviceAddress: { color: colors.subtext, fontSize: 11, marginTop: 2 },
   progressTrack: {
     height: 10,
     borderRadius: 6,
