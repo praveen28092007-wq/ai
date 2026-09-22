@@ -54,6 +54,17 @@ async function decideRequestApi(name, requestId, approve) {
   }
 }
 
+async function deletePersonApi(name) {
+  try {
+    const res = await fetch(`${GOV_DASHBOARD_URL}/api/people/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
 export default function GovernmentScreen() {
   const [tab, setTab] = useState('people'); // 'people' | 'requests'
   const [people, setPeople] = useState([]);
@@ -93,6 +104,25 @@ export default function GovernmentScreen() {
     const ok = await decideRequestApi(personName, requestId, approve);
     if (ok) refresh();
     else Alert.alert('Could not save decision', 'Check your internet connection.');
+  }
+
+  function handleDelete(personName) {
+    Alert.alert(
+      'Delete this person?',
+      `${personName} and all their vehicles will be permanently removed. This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            const ok = await deletePersonApi(personName);
+            if (ok) refresh();
+            else Alert.alert('Could not delete', 'Check your internet connection.');
+          },
+        },
+      ]
+    );
   }
 
   return (
@@ -174,11 +204,16 @@ export default function GovernmentScreen() {
                     )}
                     {flagged && <Text style={styles.flagText}>Suggested fine: ₹{fine}</Text>}
                   </View>
-                  {flagged && (
-                    <TouchableOpacity onPress={() => setFineTarget(item)} style={styles.fineBtn}>
-                      <Text style={styles.fineBtnText}>Issue Fine</Text>
+                  <View style={styles.rowActions}>
+                    {flagged && (
+                      <TouchableOpacity onPress={() => setFineTarget(item)} style={styles.fineBtn}>
+                        <Text style={styles.fineBtnText}>Issue Fine</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity onPress={() => handleDelete(item.name)}>
+                      <Text style={styles.deleteText}>Delete</Text>
                     </TouchableOpacity>
-                  )}
+                  </View>
                 </View>
               );
             }}
@@ -330,8 +365,10 @@ const styles = StyleSheet.create({
   badgeFlaggedText: { color: '#fff', fontSize: 10, fontWeight: '800' },
   badgeOk: { backgroundColor: colors.accentDim, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
   badgeOkText: { color: '#fff', fontSize: 10, fontWeight: '800' },
+  rowActions: { alignItems: 'flex-end', gap: 8 },
   fineBtn: { backgroundColor: colors.danger, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
   fineBtnText: { color: '#fff', fontSize: 11, fontWeight: '800' },
+  deleteText: { color: colors.subtext, fontSize: 11, opacity: 0.7 },
   decideRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
   approveBtn: { backgroundColor: colors.accent, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },
   approveBtnText: { color: '#fff', fontSize: 12, fontWeight: '800' },

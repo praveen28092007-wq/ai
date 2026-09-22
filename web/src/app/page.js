@@ -53,6 +53,12 @@ export default function DashboardPage() {
     refresh();
   }
 
+  async function handleDelete(personName) {
+    if (!confirm(`Permanently delete ${personName} and all their vehicles? This cannot be undone.`)) return;
+    await fetch(`/api/people/${encodeURIComponent(personName)}`, { method: 'DELETE' });
+    refresh();
+  }
+
   return (
     <main className="flex-1 bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-3xl px-6 py-12">
@@ -160,14 +166,22 @@ export default function DashboardPage() {
                           </div>
                         )}
                       </div>
-                      {flagged && (
+                      <div className="flex shrink-0 flex-col items-end gap-2">
+                        {flagged && (
+                          <button
+                            onClick={() => setFineTarget(p)}
+                            className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-500"
+                          >
+                            Issue Fine
+                          </button>
+                        )}
                         <button
-                          onClick={() => setFineTarget(p)}
-                          className="shrink-0 rounded-md bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-500"
+                          onClick={() => handleDelete(p.name)}
+                          className="text-[11px] text-slate-600 hover:text-slate-400"
                         >
-                          Issue Fine
+                          Delete
                         </button>
-                      )}
+                      </div>
                     </div>
 
                     <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800">

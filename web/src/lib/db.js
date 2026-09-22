@@ -19,9 +19,13 @@ const PEOPLE_KEY = 'co2tracker:people';
 
 // ownerName: null = demo-only vehicle, not owned by any signed-up rider, exists so the
 // government dashboard has other vehicles to compare against.
+// 5 dummy accounts, mix of over/under the 2500kg/year limit, realistic Indian reg numbers.
 const SEED_VEHICLES = {
-  KA01CD5678: { regNo: 'KA01CD5678', fuelType: 'petrol', ownerName: 'Demo Rider A', cumulativeCo2Kg: 420, cumulativeKm: 1800, trips: [] },
-  KA03EF9012: { regNo: 'KA03EF9012', fuelType: 'diesel', ownerName: 'Demo Rider B', cumulativeCo2Kg: 2650, cumulativeKm: 2100, trips: [] },
+  KA01AB1111: { regNo: 'KA01AB1111', fuelType: 'petrol', ownerName: 'Ravi Kumar', cumulativeCo2Kg: 1180, cumulativeKm: 5100, trips: [] },
+  KA02CD2222: { regNo: 'KA02CD2222', fuelType: 'petrol', ownerName: 'Ananya Rao', cumulativeCo2Kg: 890, cumulativeKm: 3850, trips: [] },
+  KA03EF3333: { regNo: 'KA03EF3333', fuelType: 'diesel', ownerName: 'Suresh Babu', cumulativeCo2Kg: 3120, cumulativeKm: 4600, trips: [] },
+  KA04GH4444: { regNo: 'KA04GH4444', fuelType: 'petrol', ownerName: 'Divya Shetty', cumulativeCo2Kg: 2910, cumulativeKm: 6200, trips: [] },
+  KA05IJ5555: { regNo: 'KA05IJ5555', fuelType: 'petrol', ownerName: 'Mohammed Irfan', cumulativeCo2Kg: 640, cumulativeKm: 2700, trips: [] },
 };
 
 // A "person" record holds everything that isn't tied to one vehicle: fines issued
@@ -30,9 +34,7 @@ function emptyPerson(name) {
   return { name, budgetBonusKg: 0, fines: [], permitRequests: [], unreadCount: 0 };
 }
 
-const SEED_PEOPLE = {
-  'Demo Rider B': { ...emptyPerson('Demo Rider B') },
-};
+const SEED_PEOPLE = {};
 
 function requireRedis() {
   const client = getRedis();
@@ -226,4 +228,20 @@ export async function markPersonRead(name) {
   people[name] = person;
   await client.set(PEOPLE_KEY, people);
   return person;
+}
+
+// Removes a person's record and every vehicle registered to them. Used to clean up
+// test/junk accounts from the shared demo database — irreversible.
+export async function deletePerson(name) {
+  const client = requireRedis();
+
+  const vehicles = await readVehicles(client);
+  for (const [regNo, v] of Object.entries(vehicles)) {
+    if (v.ownerName === name) delete vehicles[regNo];
+  }
+  await client.set(VEHICLES_KEY, vehicles);
+
+  const people = await readPeople(client);
+  delete people[name];
+  await client.set(PEOPLE_KEY, people);
 }
